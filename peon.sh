@@ -3088,6 +3088,10 @@ elif event == 'PostToolUseFailure':
 elif event == 'SubagentStart':
     # Record parent's pack so spawned subagent sessions inherit it, then stay silent
     state['pending_subagent_pack'] = dict(ts=time.time(), pack=active_pack)
+    # Track parent sessions that have spawned subagents (for suppressing intermediate Stop sounds)
+    parent_subs = state.get('parent_subagent_sessions', {})
+    parent_subs[session_id] = time.time()
+    state['parent_subagent_sessions'] = parent_subs
     state_dirty = True
     os.makedirs(os.path.dirname(state_file) or '.', exist_ok=True)
     json.dump(state, open(state_file, 'w'))
@@ -3107,7 +3111,7 @@ elif event == 'PreCompact':
     msg = project + '  \u2014  Context compacting'
 elif event == 'SessionEnd':
     # Clean up state for this session
-    for key in ('session_packs', 'prompt_timestamps', 'session_start_times', 'prompt_start_times', 'subagent_sessions'):
+    for key in ('session_packs', 'prompt_timestamps', 'session_start_times', 'prompt_start_times', 'subagent_sessions', 'parent_subagent_sessions'):
         d = state.get(key, {})
         if session_id in d:
             del d[session_id]
@@ -3166,8 +3170,11 @@ elif category:
         notify = ''
 
 # --- Check if category is enabled ---
-# Use subagent_categories for subagent events (subagentStop or known subagent session)
-is_subagent = raw_event == 'subagentStop' or session_id in state.get('subagent_sessions', {})
+# Use subagent_categories for: subagentStop events, known subagent sessions,
+# or parent sessions that spawned subagents (intermediate Stop sounds during team coordination)
+is_subagent = (raw_event == 'subagentStop'
+    or session_id in state.get('subagent_sessions', {})
+    or session_id in state.get('parent_subagent_sessions', {}))
 effective_cats = sub_cat_enabled if is_subagent else cat_enabled
 if category and not effective_cats.get(category, True):
     category = ''
