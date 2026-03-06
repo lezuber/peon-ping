@@ -3182,6 +3182,11 @@ _parent_sub_ts = _parent_subs.get(session_id, 0)
 _subagent_window = float(cfg.get('subagent_coordination_seconds', 120))
 if _parent_sub_ts and (time.time() - _parent_sub_ts) < _subagent_window:
     is_subagent = True
+    # Extend the coordination window while intermediate events keep firing
+    if event == 'Stop':
+        _parent_subs[session_id] = time.time()
+        state['parent_subagent_sessions'] = _parent_subs
+        state_dirty = True
 elif _parent_sub_ts:
     del _parent_subs[session_id]
     state['parent_subagent_sessions'] = _parent_subs
