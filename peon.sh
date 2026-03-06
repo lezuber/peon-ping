@@ -2984,6 +2984,12 @@ if event == 'SessionStart':
     status = 'ready'
 elif event == 'UserPromptSubmit':
     status = 'working'
+    # User sent a new prompt — team task is done; clean up parent tracking
+    parent_subs = state.get('parent_subagent_sessions', {})
+    if session_id in parent_subs:
+        del parent_subs[session_id]
+        state['parent_subagent_sessions'] = parent_subs
+        state_dirty = True
     if cat_enabled.get('user.spam', True):
         all_ts = state.get('prompt_timestamps', {})
         if isinstance(all_ts, list):
@@ -3170,27 +3176,17 @@ elif category:
         notify = ''
 
 # --- Check if category is enabled ---
-# Use subagent_categories for: subagentStop events, known subagent sessions,
-# or parent sessions that spawned subagents (intermediate Stop sounds during team coordination)
+# Use subagent_categories for: subagentStop events or known subagent sessions
 is_subagent = (raw_event == 'subagentStop'
     or session_id in state.get('subagent_sessions', {}))
 
-# Parent sessions with subagents: suppress only while subagents are likely still active
-# After the coordination window expires, allow normal sounds (final completion)
-_parent_subs = state.get('parent_subagent_sessions', {})
-_parent_sub_ts = _parent_subs.get(session_id, 0)
-_subagent_window = float(cfg.get('subagent_coordination_seconds', 120))
-if _parent_sub_ts and (time.time() - _parent_sub_ts) < _subagent_window:
-    is_subagent = True
-    # Extend the coordination window while intermediate events keep firing
-    if event == 'Stop':
-        _parent_subs[session_id] = time.time()
-        state['parent_subagent_sessions'] = _parent_subs
-        state_dirty = True
-elif _parent_sub_ts:
-    del _parent_subs[session_id]
-    state['parent_subagent_sessions'] = _parent_subs
-    state_dirty = True
+# Parent sessions with subagents: use debounce instead of immediate sound.
+# Each intermediate Stop cancels the previous; only the last one plays (after delay).
+_is_parent_with_subs = session_id in state.get('parent_subagent_sessions', {})
+if _is_parent_with_subs and event == 'Stop' and category == 'task.complete':
+    # Emit DEBOUNCE flag — bash layer handles the delay/cancel logic
+    _debounce_seconds = int(cfg.get('subagent_debounce_seconds', 30))
+    print('DEBOUNCE_SOUND=' + str(_debounce_seconds))
 
 effective_cats = sub_cat_enabled if is_subagent else cat_enabled
 if category and not effective_cats.get(category, True):
@@ -3389,6 +3385,7 @@ if _tpl:
 
 # --- Output shell variables ---
 print('PEON_EXIT=false')
+print('SESSION_ID=' + q(session_id))
 print('EVENT=' + q(event))
 print('VOLUME=' + q(str(volume)))
 print('PROJECT=' + q(project))
@@ -3570,11 +3567,42 @@ _run_sound_and_notify() {
   fi
 }
 
-# In test mode run synchronously; in production background to avoid blocking the IDE
-if [ "${PEON_TEST:-0}" = "1" ]; then
-  _run_sound_and_notify
+# --- Debounce support for parent sessions with active subagents ---
+# When DEBOUNCE_SOUND is set, delay playback so intermediate Stop events cancel each other.
+# Only the last Stop's sound survives the delay.
+_cancel_debounce() {
+  [ -z "${SESSION_ID:-}" ] && return
+  local _id _pf _pid
+  _id=$(printf '%s' "$SESSION_ID" | md5 -q 2>/dev/null || printf '%s' "$SESSION_ID" | md5sum 2>/dev/null | cut -d' ' -f1)
+  _pf="$PEON_DIR/.debounce.${_id}.pid"
+  [ -f "$_pf" ] || return 0
+  _pid=$(cat "$_pf" 2>/dev/null)
+  [ -n "$_pid" ] && kill "$_pid" 2>/dev/null || true
+  rm -f "$_pf"
+}
+
+if [ -n "${DEBOUNCE_SOUND:-}" ] && [ "$DEBOUNCE_SOUND" -gt 0 ] 2>/dev/null; then
+  _cancel_debounce
+  _debounce_id=$(printf '%s' "$SESSION_ID" | md5 -q 2>/dev/null || printf '%s' "$SESSION_ID" | md5sum 2>/dev/null | cut -d' ' -f1)
+  _debounce_pidfile="$PEON_DIR/.debounce.${_debounce_id}.pid"
+
+  # Fork a delayed sound process — if not killed by a subsequent Stop, it plays
+  (
+    sleep "$DEBOUNCE_SOUND"
+    _run_sound_and_notify
+    rm -f "$_debounce_pidfile"
+  ) &
+  echo $! > "$_debounce_pidfile"
+  disown
 else
-  _run_sound_and_notify & disown
+  # Cancel any pending debounce (session moved on — e.g. UserPromptSubmit after team work)
+  _cancel_debounce
+  # In test mode run synchronously; in production background to avoid blocking the IDE
+  if [ "${PEON_TEST:-0}" = "1" ]; then
+    _run_sound_and_notify
+  else
+    _run_sound_and_notify & disown
+  fi
 fi
 
 # --- Trainer reminder sound (after main sound finishes) ---
