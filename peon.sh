@@ -3173,8 +3173,20 @@ elif category:
 # Use subagent_categories for: subagentStop events, known subagent sessions,
 # or parent sessions that spawned subagents (intermediate Stop sounds during team coordination)
 is_subagent = (raw_event == 'subagentStop'
-    or session_id in state.get('subagent_sessions', {})
-    or session_id in state.get('parent_subagent_sessions', {}))
+    or session_id in state.get('subagent_sessions', {}))
+
+# Parent sessions with subagents: suppress only while subagents are likely still active
+# After the coordination window expires, allow normal sounds (final completion)
+_parent_subs = state.get('parent_subagent_sessions', {})
+_parent_sub_ts = _parent_subs.get(session_id, 0)
+_subagent_window = float(cfg.get('subagent_coordination_seconds', 120))
+if _parent_sub_ts and (time.time() - _parent_sub_ts) < _subagent_window:
+    is_subagent = True
+elif _parent_sub_ts:
+    del _parent_subs[session_id]
+    state['parent_subagent_sessions'] = _parent_subs
+    state_dirty = True
+
 effective_cats = sub_cat_enabled if is_subagent else cat_enabled
 if category and not effective_cats.get(category, True):
     category = ''
